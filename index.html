@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <title>Тренажёрка</title>
+  <meta name="description" content="Офлайн-трекер тренировок и показателей здоровья">
+  <meta name="theme-color" content="#101216">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Тренажёрка">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-180.png">
+  <link rel="stylesheet" href="./css/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>Тренажёрка</h1>
+  </header>
+
+  <main id="view" class="view"></main>
+
+  <nav class="tabbar" id="tabbar">
+    <a class="tab" data-tab="home" href="#/home">
+      <svg viewBox="0 0 24 24"><path d="M3 11.2 12 4l9 7.2V20h-6v-5h-6v5H3z"/></svg>
+      <span>Главная</span>
+    </a>
+    <a class="tab" data-tab="workouts" href="#/workouts">
+      <svg viewBox="0 0 24 24"><path d="M6.5 6v12M17.5 6v12M3.5 8.5v7M20.5 8.5v7M6.5 12h11" stroke-width="2.2" fill="none" stroke-linecap="round"/></svg>
+      <span>Тренировки</span>
+    </a>
+    <a class="tab" data-tab="health" href="#/health/records">
+      <svg viewBox="0 0 24 24"><path d="M12 20.5S3.5 15.4 2.6 10.1C2 6.6 4.6 3.9 7.6 3.9c1.9 0 3.4 1 4.4 2.6 1-1.6 2.5-2.6 4.4-2.6 3 0 5.6 2.7 5 6.2C20.5 15.4 12 20.5 12 20.5z"/></svg>
+      <span>Здоровье</span>
+    </a>
+    <a class="tab" data-tab="exercises" href="#/exercises">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke-width="2"/><path d="M10 8.6 15.5 12 10 15.4z"/></svg>
+      <span>Упражнения</span>
+    </a>
+    <a class="tab" data-tab="history" href="#/history">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke-width="2"/><path d="M12 7v5l3.2 2" fill="none" stroke-width="2" stroke-linecap="round"/></svg>
+      <span>История</span>
+    </a>
+  </nav>
+
+  <div id="toast" class="toast" role="status"></div>
+
+  <script type="module" src="./js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    }
+  </script>
+</body>
+</html>
