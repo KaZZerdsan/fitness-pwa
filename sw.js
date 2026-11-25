@@ -1,5 +1,5 @@
 // Service Worker: офлайн-кэш приложения
-const VERSION = 'v5';
+const VERSION = 'v7';
 const CACHE = `trenazhorka-${VERSION}`;
 const ASSETS = [
   './',

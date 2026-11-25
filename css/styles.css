@@ -190,6 +190,29 @@ input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--accent);
   margin-bottom: 10px;
 }
 
+/* строка подхода: №, вес, повторения, действие */
+.set-head { display: flex; justify-content: space-between; align-items: baseline; margin: 6px 0; }
+.set-head label { font-size: 13px; font-weight: 600; color: var(--muted); }
+.set-row {
+  display: grid;
+  grid-template-columns: 18px 1fr 1fr 34px;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.set-row .sn {
+  font-size: 12px; color: var(--muted); font-weight: 700;
+  text-align: center; padding-bottom: 13px;
+}
+.set-row .field { margin-bottom: 0; }
+.set-row .field label { font-size: 10.5px; }
+.set-row .btn { margin-bottom: 1px; }
+.chk-skip {
+  display: flex; align-items: center; justify-content: center;
+  padding-bottom: 10px; cursor: pointer; color: var(--muted); font-weight: 700;
+}
+.chk-skip input { margin: 0; }
+
 /* список упражнений текущего круга на экране выполнения */
 .round-items { margin: 12px 0 2px; }
 .ri {

@@ -2,70 +2,100 @@
 import { db } from './db.js';
 import { uid, nowISO } from './util.js';
 
-/* ---- нормализация: старый формат (1 упражнение в блоке) → новый (items[]) ---- */
+/** число кругов блока = максимум подходов среди его упражнений */
+export const blockRounds = b =>
+  Math.max(1, ...(b.items || []).map(i => i.setsList?.length || 0));
+
+const normTempo = t => (Array.isArray(t) ? t.map(x => Math.max(0, Math.round(+x || 0))) : [3, 0, 1, 0]);
+
+/* ---- нормализация: старые форматы → текущий (подходы внутри упражнения) ---- */
 export function normalizeWorkout(w) {
   if (!w || !Array.isArray(w.blocks)) return w;
 
-  // план
+  // v0 (одно упражнение в блоке) → промежуточный (items[])
   if (w.blocks.length && !w.blocks[0].items) {
     w.blocks = w.blocks.map(b => ({
       title: b.title || '',
-      sets: Math.max(1, Math.round(+b.sets || 1)),
       restSec: Math.max(0, Math.round(+b.restSec || 0)),
-      items: [{
-        exerciseId: b.exerciseId,
-        weight: +b.weight || 0,
-        reps: +b.reps || 0,
-        tempo: Array.isArray(b.tempo) ? b.tempo : [3, 0, 1, 0],
-      }],
+      _rounds: Math.max(1, Math.round(+b.sets || 1)),
+      items: [{ exerciseId: b.exerciseId, weight: +b.weight || 0, reps: +b.reps || 0, tempo: b.tempo }],
     }));
   }
+
+  // план → v2 (подходы внутри упражнения)
   w.blocks.forEach(b => {
-    b.sets = Math.max(1, Math.round(+b.sets || 1));
+    const rounds = Math.max(1, Math.round(+b.sets || +b._rounds || 0) || 1);
+    delete b._rounds;
     b.restSec = Math.max(0, Math.round(+b.restSec || 0));
-    b.items = (b.items || []).map(it => ({
-      exerciseId: it.exerciseId,
-      weight: +it.weight || 0,
-      reps: +it.reps || 0,
-      tempo: Array.isArray(it.tempo) ? it.tempo : [3, 0, 1, 0],
-    }));
+    b.items = (b.items || []).map(it => {
+      if (Array.isArray(it.setsList)) {
+        return {
+          exerciseId: it.exerciseId,
+          comment: it.comment || '',
+          tempo: normTempo(it.tempo),
+          setsList: it.setsList.map(s => ({ weight: +s.weight || 0, reps: Math.max(1, Math.round(+s.reps || 1)) })),
+        };
+      }
+      // v1: один вес/повторы на упражнение, круги задавались на блоке
+      const set = { weight: +it.weight || 0, reps: Math.max(1, Math.round(+it.reps || 1)) };
+      return {
+        exerciseId: it.exerciseId,
+        comment: it.comment || '',
+        tempo: normTempo(it.tempo),
+        setsList: Array.from({ length: rounds }, () => ({ ...set })),
+      };
+    });
+    delete b.sets;
   });
 
   // факт
-  if (Array.isArray(w.actualBlocks) && w.actualBlocks.length && !w.actualBlocks[0].items) {
-    w.actualBlocks = w.actualBlocks.map((f, i) => {
-      const plan = w.blocks[i] || { title: '', sets: 1, restSec: 0, items: [] };
-      return {
-        title: f.title || plan.title,
-        sets: plan.sets,
-        restSec: plan.restSec,
+  if (Array.isArray(w.actualBlocks) && w.actualBlocks.length) {
+    if (!w.actualBlocks[0].items) {
+      // v0 факт → промежуточный (items[])
+      w.actualBlocks = w.actualBlocks.map((f, i) => ({
+        title: f.title || w.blocks[i]?.title || '',
+        restSec: w.blocks[i]?.restSec ?? 0,
         skipped: !!f.skipped,
-        setsActual: +f.sets || 0,
-        items: [{
-          exerciseId: f.exerciseId,
-          weight: plan.items[0]?.weight ?? (+f.weight || 0),
-          reps: plan.items[0]?.reps ?? (+f.reps || 0),
-          tempo: plan.items[0]?.tempo ?? f.tempo ?? [3, 0, 1, 0],
-          actualWeight: +f.weight || 0,
-          actualReps: +f.reps || 0,
-        }],
-      };
+        items: [{ exerciseId: f.exerciseId, actualWeight: +f.weight || 0, actualReps: +f.reps || 0 }],
+      }));
+    }
+    w.actualBlocks.forEach((f, i) => {
+      const planItems = w.blocks[i]?.items || [];
+      f.skipped = !!f.skipped;
+      f.restSec = w.blocks[i]?.restSec ?? f.restSec ?? 0;
+      const oldRounds = Math.round(+f.setsActual || 0); // сколько кругов сделано в старом формате
+      delete f.sets; delete f.setsActual;
+      f.items = (f.items || []).map((it, j) => {
+        const plan = planItems[j];
+        if (Array.isArray(it.actualSets)) {
+          return {
+            exerciseId: it.exerciseId,
+            comment: plan?.comment || '',
+            tempo: normTempo(plan?.tempo ?? it.tempo),
+            setsList: (plan?.setsList || []).map(s => ({ ...s })),
+            actualSets: it.actualSets.map(s => ({
+              weight: +s.weight || 0,
+              reps: Math.max(0, Math.round(+s.reps || 0)),
+              skipped: !!s.skipped,
+            })),
+          };
+        }
+        // v1 факт: actualWeight/actualReps на упражнении (+ число кругов на блоке)
+        const planSets = plan?.setsList || [];
+        return {
+          exerciseId: it.exerciseId,
+          comment: plan?.comment || '',
+          tempo: normTempo(plan?.tempo ?? it.tempo),
+          setsList: planSets.map(s => ({ ...s })),
+          actualSets: planSets.map((_, k) => ({
+            weight: +it.actualWeight || 0,
+            reps: Math.max(0, Math.round(+it.actualReps || 0)),
+            skipped: oldRounds > 0 && k >= oldRounds,
+          })),
+        };
+      });
     });
   }
-  (w.actualBlocks || []).forEach((f, i) => {
-    const plan = w.blocks[i];
-    f.sets = plan?.sets ?? f.sets;
-    f.restSec = plan?.restSec ?? f.restSec;
-    f.setsActual = +f.setsActual ?? 0;
-    f.items = (f.items || []).map((it, j) => ({
-      exerciseId: it.exerciseId,
-      weight: plan?.items?.[j]?.weight ?? (+it.weight || 0),
-      reps: plan?.items?.[j]?.reps ?? (+it.reps || 0),
-      tempo: plan?.items?.[j]?.tempo ?? it.tempo ?? [3, 0, 1, 0],
-      actualWeight: +it.actualWeight ?? 0,
-      actualReps: +it.actualReps ?? 0,
-    }));
-  });
   return w;
 }
 
@@ -81,11 +111,17 @@ export async function getWorkout(id) {
 export function blockHasDiff(b, f) {
   if (!f) return false;
   if (f.skipped) return true;
-  if (Math.round(+f.setsActual || 0) !== +b.sets) return true;
   return (b.items || []).some((it, i) => {
     const fi = f.items?.[i];
     if (!fi) return true;
-    return (+fi.actualWeight !== +it.weight) || (+fi.actualReps !== +it.reps);
+    const plan = it.setsList || [];
+    const fact = fi.actualSets || [];
+    if (fact.length !== plan.length) return true;
+    return plan.some((s, k) => {
+      const a = fact[k];
+      if (!a || a.skipped) return true;
+      return (+a.weight !== +s.weight) || (+a.reps !== +s.reps);
+    });
   });
 }
 
@@ -96,17 +132,14 @@ export async function startWorkout(w) {
   w.startedAt = nowISO();
   w.actualBlocks = w.blocks.map(b => ({
     title: b.title,
-    sets: b.sets,
     restSec: b.restSec,
     skipped: false,
-    setsActual: b.sets,
     items: b.items.map(it => ({
       exerciseId: it.exerciseId,
-      weight: it.weight,
-      reps: it.reps,
+      comment: it.comment,
       tempo: [...it.tempo],
-      actualWeight: it.weight,
-      actualReps: it.reps,
+      setsList: it.setsList.map(s => ({ ...s })),
+      actualSets: it.setsList.map(s => ({ weight: s.weight, reps: s.reps, skipped: false })),
     })),
   }));
   w.progress = { blockIndex: 0, setIndex: 0, itemIndex: 0, restEndsAt: null };
@@ -136,13 +169,12 @@ export async function repeatWorkout(w) {
     progress: null,
     blocks: w.blocks.map(b => ({
       title: b.title || '',
-      sets: b.sets,
       restSec: b.restSec,
       items: b.items.map(it => ({
         exerciseId: it.exerciseId,
-        weight: it.weight,
-        reps: it.reps,
+        comment: it.comment || '',
         tempo: [...it.tempo],
+        setsList: it.setsList.map(s => ({ ...s })),
       })),
     })),
     actualBlocks: [],

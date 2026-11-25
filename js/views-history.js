@@ -45,8 +45,8 @@ export async function renderProgress(root) {
   const done = workouts.filter(w => w.status === 'completed')
     .sort((a, b) => (a.finishedAt || '').localeCompare(b.finishedAt || ''));
 
-  // упражнения с фактическими данными (по элементам суперсетов)
-  const byEx = new Map(); // exerciseId -> [{w, item, fItem, fBlock}]
+  // упражнения с фактическими данными (по элементам суперсетов и их подходам)
+  const byEx = new Map(); // exerciseId -> [{w, item, fItem}]
   for (const w of done) {
     (w.blocks || []).forEach((b, i) => {
       const f = w.actualBlocks?.[i];
@@ -55,7 +55,7 @@ export async function renderProgress(root) {
         const fi = f.items?.[j];
         if (!fi) return;
         if (!byEx.has(it.exerciseId)) byEx.set(it.exerciseId, []);
-        byEx.get(it.exerciseId).push({ w, item: it, fItem: fi, fBlock: f });
+        byEx.get(it.exerciseId).push({ w, item: it, fItem: fi });
       });
     });
   }
@@ -88,23 +88,29 @@ export async function renderProgress(root) {
   const draw = () => {
     const id = root.querySelector('#p-ex').value;
     const arr = byEx.get(id) || [];
-    // по тренировке берём элемент с максимальным фактическим весом
+    // по тренировке берём подход с максимальным фактическим весом
     const perWorkout = new Map();
     for (const e of arr) {
-      const cur = perWorkout.get(e.w.id);
-      if (!cur || (+e.fItem.actualWeight || 0) > (+cur.fItem.actualWeight || 0)) perWorkout.set(e.w.id, e);
+      for (const fs of (e.fItem.actualSets || [])) {
+        if (fs.skipped) continue;
+        const cur = perWorkout.get(e.w.id);
+        if (!cur || (+fs.weight || 0) > (+cur.fs.weight || 0)) perWorkout.set(e.w.id, { w: e.w, fs });
+      }
     }
-    const pts = [...perWorkout.values()].map(({ w, fItem }) => ({
+    const pts = [...perWorkout.values()].map(({ w, fs }) => ({
       x: fmtDateShort(w.finishedAt),
-      y: +fItem.actualWeight || 0,
-      label: `${fmtKg(fItem.actualWeight)}×${fItem.actualReps}`,
+      y: +fs.weight || 0,
+      label: `${fmtKg(fs.weight)}×${fs.reps}`,
     }));
     root.querySelector('#p-chart').innerHTML = chartSvg(pts);
 
     const name = opts.find(o => o.id === id)?.name || '';
     root.querySelector('#p-table').innerHTML = `
       <div class="section-title">${esc(name)} — все выполнения</div>
-      ${arr.slice().reverse().map(({ w, item, fItem, fBlock }) => `
+      ${arr.slice().reverse().map(({ w, item, fItem }) => {
+        const fact = (fItem.actualSets || []).map(s => s.skipped ? '✕' : `${fmtKg(s.weight)}×${s.reps}`).join(', ');
+        const plan = item.setsList.map(s => `${fmtKg(s.weight)}×${s.reps}`).join(', ');
+        return `
         <div class="card">
           <div class="row between">
             <div class="grow">
@@ -112,11 +118,12 @@ export async function renderProgress(root) {
               <div class="muted small">${fmtDate(w.finishedAt)}</div>
             </div>
             <div style="text-align:right">
-              <b>${fmtKg(fItem.actualWeight)} кг × ${fBlock.setsActual}×${fItem.actualReps}</b>
-              <div class="muted small">план: ${fmtKg(item.weight)} кг × ${item.reps}</div>
+              <b>${fact}</b>
+              <div class="muted small">план: ${plan}</div>
             </div>
           </div>
-        </div>`).join('')}`;
+        </div>`;
+      }).join('')}`;
   };
 
   root.querySelector('#p-ex').addEventListener('change', draw);

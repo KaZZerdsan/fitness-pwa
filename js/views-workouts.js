@@ -1,9 +1,8 @@
-// Тренировки: список, редактор шаблона (блоки с несколькими упражнениями), просмотр план/факт
+// Тренировки: список, редактор шаблона (подходы внутри упражнения), просмотр план/факт
 import { db } from './db.js';
 import { esc, uid, nowISO, toast, confirmAction, fmtDate, fmtDur, fmtTime, tempoStr, num, plural } from './util.js';
-import { startWorkout, cancelWorkout, repeatWorkout, getWorkouts, getWorkout, blockHasDiff } from './workout-ops.js';
+import { startWorkout, repeatWorkout, getWorkouts, getWorkout, blockHasDiff, blockRounds } from './workout-ops.js';
 
-function rerender() { window.dispatchEvent(new HashChangeEvent('hashchange')); }
 const fmtN = n => String(n ?? '').replace('.', ',');
 
 const STATUS = {
@@ -12,14 +11,14 @@ const STATUS = {
   completed: ['b-done', 'завершена'],
 };
 
-const defaultItem = () => ({ exerciseId: '', weight: '', reps: 10, tempo: [3, 0, 1, 0] });
-const defaultBlock = () => ({ title: '', sets: 3, restSec: 90, items: [defaultItem()] });
+const defaultItem = () => ({ exerciseId: '', comment: '', tempo: [2, 0, 2, 0], setsList: [{ weight: '', reps: 10 }] });
+const defaultBlock = () => ({ title: '', restSec: 120, items: [defaultItem()] });
 
 const TEMPO_LBL = [
   ['Опускание', 'сек на опускание веса'],
-  ['Пауза внизу', 'пауза после опускания'],
+  ['Пауза', 'пауза после опускания'],
   ['Поднятие', 'сек на поднятие веса'],
-  ['Пауза вверху', 'пауза после поднятия'],
+  ['Пауза', 'пауза после поднятия'],
 ];
 
 /* ==================== СПИСОК ==================== */
@@ -69,7 +68,12 @@ export async function renderWorkoutForm(root, id) {
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ru'));
 
   const draft = existing
-    ? { ...existing, blocks: existing.blocks.map(b => ({ ...b, items: b.items.map(it => ({ ...it, tempo: [...it.tempo] })) })) }
+    ? {
+        ...existing, blocks: existing.blocks.map(b => ({
+          ...b,
+          items: b.items.map(it => ({ ...it, tempo: [...it.tempo], setsList: it.setsList.map(s => ({ ...s })) })),
+        })),
+      }
     : { id: uid(), name: '', status: 'created', createdAt: nowISO(), blocks: [defaultBlock()] };
 
   root.innerHTML = `
@@ -97,7 +101,24 @@ export async function renderWorkoutForm(root, id) {
     `<option value="">— выберите —</option>` + exercises
       .map(e => `<option value="${e.id}" ${e.id === sel ? 'selected' : ''}>${esc(e.name)}</option>`).join('');
 
+  function setRowHTML(si, s, canDel) {
+    return `
+      <div class="set-row" data-set="${si}">
+        <span class="sn">${si + 1}</span>
+        <div class="field">
+          <label>Вес, кг</label>
+          <input data-sf="weight" type="number" inputmode="decimal" min="0" step="any" value="${esc(s.weight)}">
+        </div>
+        <div class="field">
+          <label>Повторений</label>
+          <input data-sf="reps" type="number" inputmode="numeric" min="1" step="1" value="${esc(s.reps)}">
+        </div>
+        <button class="btn icon sm danger" data-setdel ${canDel ? '' : 'disabled'} title="Удалить подход">✕</button>
+      </div>`;
+  }
+
   function itemHTML(bi, it, ii) {
+    const rounds = Math.max(...draft.blocks[bi].items.map(x => x.setsList.length));
     return `
       <div class="item-card" data-i="${ii}">
         <div class="row between" style="margin-bottom:6px">
@@ -113,15 +134,9 @@ export async function renderWorkoutForm(root, id) {
           <label>Упражнение *</label>
           <select data-if="exerciseId">${exOptions(it.exerciseId)}</select>
         </div>
-        <div class="grid2">
-          <div class="field">
-            <label>Вес, кг</label>
-            <input data-if="weight" type="number" inputmode="decimal" min="0" step="any" value="${esc(it.weight)}">
-          </div>
-          <div class="field">
-            <label>Повторений</label>
-            <input data-if="reps" type="number" inputmode="numeric" min="1" step="1" value="${esc(it.reps)}">
-          </div>
+        <div class="field">
+          <label>Комментарий (необязательно)</label>
+          <input data-if="comment" type="text" maxlength="80" placeholder="например: можно дробно" value="${esc(it.comment || '')}">
         </div>
         <div class="field">
           <label title="${TEMPO_LBL.map(x => x[1]).join(' · ')}">Темп</label>
@@ -133,6 +148,12 @@ export async function renderWorkoutForm(root, id) {
               </div>`).join('')}
           </div>
         </div>
+        <div class="set-head">
+          <label>Подходы (${it.setsList.length})</label>
+          <span class="muted small">${it.setsList.length === rounds ? 'кругов: ' + rounds : 'из ' + rounds + ' кругов'}</span>
+        </div>
+        ${it.setsList.map((s, si) => setRowHTML(si, s, it.setsList.length > 1)).join('')}
+        <button class="btn ghost sm" data-addset style="width:100%;margin-bottom:4px">+ Подход</button>
       </div>`;
   }
 
@@ -151,15 +172,9 @@ export async function renderWorkoutForm(root, id) {
           <label>Комментарий к блоку (необязательно)</label>
           <input data-bf="title" type="text" maxlength="60" placeholder="Например: суперсет" value="${esc(b.title || '')}">
         </div>
-        <div class="grid2">
-          <div class="field">
-            <label title="Сколько раз пройти круг из всех упражнений блока">Кругов (подходов)</label>
-            <input data-bf="sets" type="number" inputmode="numeric" min="1" step="1" value="${esc(b.sets)}">
-          </div>
-          <div class="field">
-            <label title="Отдых между кругами, в секундах">Отдых, сек</label>
-            <input data-bf="restSec" type="number" inputmode="numeric" min="0" step="1" value="${esc(b.restSec)}">
-          </div>
+        <div class="field">
+          <label title="Отдых между кругами, в секундах">Отдых между кругами, сек</label>
+          <input data-bf="restSec" type="number" inputmode="numeric" min="0" step="1" value="${esc(b.restSec)}">
         </div>
         <div class="section-title" style="margin:8px 2px 6px">Упражнения (${b.items.length}) — выполняются кругом, друг за другом</div>
         ${b.items.map((it, ii) => itemHTML(bi, it, ii)).join('')}
@@ -173,20 +188,42 @@ export async function renderWorkoutForm(root, id) {
       const bi = +card.dataset.b;
       const b = draft.blocks[bi];
 
-      // значения блока
       card.querySelectorAll('[data-bf]').forEach(inp => {
         inp.addEventListener('input', () => { b[inp.dataset.bf] = inp.value; });
       });
-      // значения упражнений
+
       card.querySelectorAll('.item-card').forEach(icard => {
         const ii = +icard.dataset.i;
         const it = b.items[ii];
+
         icard.querySelectorAll('[data-if]').forEach(inp => {
           inp.addEventListener('input', () => { it[inp.dataset.if] = inp.value; });
         });
         icard.querySelectorAll('[data-it]').forEach(inp => {
           inp.addEventListener('input', () => { it.tempo[+inp.dataset.it] = num(inp.value) ?? 0; });
         });
+
+        // подходы
+        icard.querySelectorAll('.set-row').forEach(row => {
+          const si = +row.dataset.set;
+          const s = it.setsList[si];
+          row.querySelectorAll('[data-sf]').forEach(inp => {
+            inp.addEventListener('input', () => { s[inp.dataset.sf] = inp.value; });
+          });
+          row.querySelector('[data-setdel]')?.addEventListener('click', () => {
+            if (it.setsList.length === 1) { toast('Должен остаться хотя бы один подход'); return; }
+            it.setsList.splice(si, 1);
+            renderBlocks();
+          });
+        });
+        icard.querySelector('[data-addset]').addEventListener('click', () => {
+          // предзаполнение из последнего подхода
+          const last = it.setsList[it.setsList.length - 1] || { weight: '', reps: 10 };
+          it.setsList.push({ ...last });
+          renderBlocks();
+          icard.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        });
+
         // операции над упражнением
         icard.querySelectorAll('[data-iact]').forEach(btn => {
           btn.addEventListener('click', () => {
@@ -194,7 +231,7 @@ export async function renderWorkoutForm(root, id) {
             const items = b.items;
             if (act === 'up' && ii > 0) [items[ii - 1], items[ii]] = [items[ii], items[ii - 1]];
             if (act === 'down' && ii < items.length - 1) [items[ii + 1], items[ii]] = [items[ii], items[ii + 1]];
-            if (act === 'dup') items.splice(ii + 1, 0, { ...it, tempo: [...it.tempo] });
+            if (act === 'dup') items.splice(ii + 1, 0, { ...it, tempo: [...it.tempo], setsList: it.setsList.map(s => ({ ...s })) });
             if (act === 'del') {
               if (items.length === 1) { toast('В блоке должно остаться хотя бы одно упражнение'); return; }
               items.splice(ii, 1);
@@ -203,6 +240,7 @@ export async function renderWorkoutForm(root, id) {
           });
         });
       });
+
       // операции над блоком
       card.querySelectorAll('[data-bact]').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -212,9 +250,8 @@ export async function renderWorkoutForm(root, id) {
           if (act === 'down' && bi < arr.length - 1) [arr[bi + 1], arr[bi]] = [arr[bi], arr[bi + 1]];
           if (act === 'dup') arr.splice(bi + 1, 0, {
             title: arr[bi].title,
-            sets: arr[bi].sets,
             restSec: arr[bi].restSec,
-            items: arr[bi].items.map(x => ({ ...x, tempo: [...x.tempo] })),
+            items: arr[bi].items.map(x => ({ ...x, tempo: [...x.tempo], setsList: x.setsList.map(s => ({ ...s })) })),
           });
           if (act === 'del') {
             if (arr.length === 1) { toast('Должен остаться хотя бы один блок'); return; }
@@ -247,25 +284,29 @@ export async function renderWorkoutForm(root, id) {
     if (!draft.name) errs.push('укажите название');
     if (!exercises.length) errs.push('добавьте упражнения в справочник');
     draft.blocks.forEach((b, i) => {
-      if (!(num(b.sets) >= 1)) errs.push(`блок ${i + 1}: число кругов`);
       if (!(num(b.restSec) >= 0)) errs.push(`блок ${i + 1}: отдых`);
       b.items.forEach((it, j) => {
         if (!it.exerciseId) errs.push(`блок ${i + 1}, упражнение ${j + 1}: выберите упражнение`);
-        if (!(num(it.weight) >= 0)) errs.push(`блок ${i + 1}, упражнение ${j + 1}: вес`);
-        if (!(num(it.reps) >= 1)) errs.push(`блок ${i + 1}, упражнение ${j + 1}: повторения`);
+        if (!it.setsList.length) errs.push(`блок ${i + 1}, упражнение ${j + 1}: добавьте подход`);
+        it.setsList.forEach((s, k) => {
+          if (!(num(s.weight) >= 0)) errs.push(`блок ${i + 1}, упр. ${j + 1}, подход ${k + 1}: вес`);
+          if (!(num(s.reps) >= 1)) errs.push(`блок ${i + 1}, упр. ${j + 1}, подход ${k + 1}: повторения`);
+        });
       });
     });
     if (errs.length) { toast('Проверьте: ' + errs[0]); return; }
 
     draft.blocks = draft.blocks.map(b => ({
       title: (b.title || '').trim(),
-      sets: Math.round(num(b.sets)),
       restSec: Math.round(num(b.restSec) || 0),
       items: b.items.map(it => ({
         exerciseId: it.exerciseId,
-        weight: num(it.weight) || 0,
-        reps: Math.round(num(it.reps)),
+        comment: (it.comment || '').trim(),
         tempo: it.tempo.map(t => Math.max(0, Math.round(num(t) || 0))),
+        setsList: it.setsList.map(s => ({
+          weight: num(s.weight) || 0,
+          reps: Math.round(num(s.reps)),
+        })),
       })),
     }));
 
@@ -284,13 +325,16 @@ export async function renderWorkoutForm(root, id) {
 }
 
 /* ==================== ПРОСМОТР (в т.ч. завершённой) ==================== */
-/** блоки «план → факт» с отклонениями (суперсеты) */
+const setsPlanStr = list => (list || []).map(s => `${fmtN(s.weight)}×${s.reps}`).join(', ');
+
+/** блоки «план → факт» с отклонениями (подходы внутри упражнений) */
 export function blocksCompareHTML(blocks, actual, exMap) {
   return (blocks || []).map((b, i) => {
     const f = actual?.[i];
+    const rounds = blockRounds(b);
     const head = `
       <div class="pf-name">Блок ${i + 1}${b.title ? ` <span class="muted small">· ${esc(b.title)}</span>` : ''}</div>
-      <div class="pf-plan">План: ${b.sets} ${plural(b.sets, ['круг', 'круга', 'кругов'])} × ${b.items.length} ${plural(b.items.length, ['упражнение', 'упражнения', 'упражнений'])} · отдых ${b.restSec} с</div>`;
+      <div class="pf-plan">План: до ${rounds} ${plural(rounds, ['круга', 'кругов', 'кругов'])} · отдых ${b.restSec} с</div>`;
 
     if (f && f.skipped) {
       return `<div class="pf-row">${head}<div class="pf-fact"><span class="badge b-out">Пропущен</span></div></div>`;
@@ -299,41 +343,36 @@ export function blocksCompareHTML(blocks, actual, exMap) {
     const itemsRows = b.items.map((it, j) => {
       const fi = f?.items?.[j];
       const name = esc(exMap[it.exerciseId] || 'Упражнение удалено');
-      const fact = fi
-        ? `${fmtN(fi.actualWeight)} кг × ${fi.actualReps} · темп ${tempoStr(it.tempo)}`
-        : '<span class="muted">—</span>';
+      let factSets = '<span class="muted">—</span>';
       let deltas = '';
       if (fi) {
+        const fact = fi.actualSets || [];
+        factSets = fact.map(s => s.skipped ? '<span class="muted">✕</span>' : `${fmtN(s.weight)}×${s.reps}`).join(', ');
         const parts = [];
-        const dw = (+fi.actualWeight || 0) - (+it.weight || 0);
-        const dr = (+fi.actualReps || 0) - (+it.reps || 0);
-        if (dw) parts.push(`<span class="delta ${dw > 0 ? 'pos' : 'neg'}">Вес ${dw > 0 ? '+' : '−'}${fmtN(Math.abs(dw))} кг</span>`);
-        if (dr) parts.push(`<span class="delta ${dr > 0 ? 'pos' : 'neg'}">Повтор. ${dr > 0 ? '+' : '−'}${Math.abs(dr)}</span>`);
-        deltas = parts.length ? `<div class="pf-deltas">${parts.join('')}</div>` : '';
+        it.setsList.forEach((s, k) => {
+          const a = fact[k];
+          if (!a) return;
+          if (a.skipped) { parts.push(`<span class="delta skip">П${k + 1} пропущен</span>`); return; }
+          const dw = (+a.weight || 0) - (+s.weight || 0);
+          const dr = (+a.reps || 0) - (+s.reps || 0);
+          const seg = [];
+          if (dw) seg.push(`${dw > 0 ? '+' : '−'}${fmtN(Math.abs(dw))} кг`);
+          if (dr) seg.push(`${dr > 0 ? '+' : '−'}${Math.abs(dr)} повт`);
+          if (seg.length) parts.push(`<span class="delta ${dw < 0 || dr < 0 ? 'neg' : 'pos'}">П${k + 1}: ${seg.join(', ')}</span>`);
+        });
+        const done = fact.filter(s => !s.skipped).length;
+        deltas = `<div class="pf-deltas">${parts.length ? parts.join('') : `<span class="delta pos">${done} из ${it.setsList.length} по плану</span>`}</div>`;
       }
       return `
         <div class="pf-item">
-          <div><b>${j + 1}. ${name}</b></div>
-          <div class="pf-plan">План: ${fmtN(it.weight)} кг × ${it.reps} · темп ${tempoStr(it.tempo)}</div>
-          <div class="pf-fact">Факт: ${fact}</div>
+          <div><b>${j + 1}. ${name}</b>${it.comment ? ` <span class="muted small">💬 ${esc(it.comment)}</span>` : ''}</div>
+          <div class="pf-plan">План: ${setsPlanStr(it.setsList)} · темп ${tempoStr(it.tempo)}</div>
+          <div class="pf-fact">Факт: ${factSets}</div>
           ${deltas}
         </div>`;
     }).join('');
 
-    let roundsDelta = '';
-    if (f) {
-      const ds = Math.round(+f.setsActual || 0) - +b.sets;
-      roundsDelta = ds
-        ? `<span class="delta ${ds > 0 ? 'pos' : 'neg'}">Круги ${ds > 0 ? '+' : '−'}${Math.abs(ds)}</span>`
-        : '<span class="delta pos">Круги по плану</span>';
-    }
-
-    return `
-      <div class="pf-row">
-        ${head}
-        ${itemsRows}
-        <div class="pf-fact" style="margin-top:4px">Кругов выполнено: <b>${f ? Math.round(+f.setsActual || 0) : '—'} из ${b.sets}</b> ${roundsDelta}</div>
-      </div>`;
+    return `<div class="pf-row">${head}${itemsRows}</div>`;
   }).join('');
 }
 
@@ -350,11 +389,11 @@ export async function renderWorkoutView(root, id) {
         ${(w.blocks || []).map((b, i) => `
           <div class="pf-row">
             <div class="pf-name">Блок ${i + 1}${b.title ? ` <span class="muted small">· ${esc(b.title)}</span>` : ''}</div>
-            <div class="pf-plan">${b.sets} ${plural(b.sets, ['круг', 'круга', 'кругов'])} × отдых ${b.restSec} с</div>
+            <div class="pf-plan">${blockRounds(b)} ${plural(blockRounds(b), ['круг', 'круга', 'кругов'])} · отдых ${b.restSec} с</div>
             ${b.items.map((it, j) => `
               <div class="pf-item">
-                <div><b>${j + 1}. ${esc(exMap[it.exerciseId] || 'Упражнение удалено')}</b></div>
-                <div class="pf-plan">${fmtN(it.weight)} кг × ${it.reps} · темп ${tempoStr(it.tempo)}</div>
+                <div><b>${j + 1}. ${esc(exMap[it.exerciseId] || 'Упражнение удалено')}</b>${it.comment ? ` <span class="muted small">💬 ${esc(it.comment)}</span>` : ''}</div>
+                <div class="pf-plan">${setsPlanStr(it.setsList)} · темп ${tempoStr(it.tempo)}</div>
               </div>`).join('')}
           </div>`).join('')}
       </div>

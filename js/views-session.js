@@ -1,7 +1,7 @@
-// Выполнение тренировки (суперсеты) + экран итогов
+// Выполнение тренировки (суперсеты с подходами внутри упражнений) + итоги
 import { db } from './db.js';
 import { esc, toast, confirmAction, fmtClock, fmtDur, tempoStr, num, nowISO, beep, vibrate, acquireWakeLock, plural } from './util.js';
-import { cancelWorkout, getWorkout } from './workout-ops.js';
+import { cancelWorkout, getWorkout, blockRounds } from './workout-ops.js';
 
 /* ==================== ВЫПОЛНЕНИЕ ==================== */
 export async function renderSession(root, id) {
@@ -11,6 +11,25 @@ export async function renderSession(root, id) {
 
   w.progress ??= { blockIndex: 0, setIndex: 0, itemIndex: 0, restEndsAt: null };
   w.progress.blockIndex = Math.min(w.progress.blockIndex, Math.max(0, w.blocks.length - 1));
+
+  // активные упражнения круга (у которых есть подход с индексом round)
+  const activeIdxs = (b, round) =>
+    b.items.map((_, idx) => idx).filter(idx => (b.items[idx].setsList?.length || 0) > round);
+  const nextActive = (b, round, after) =>
+    activeIdxs(b, round).filter(idx => idx > after)[0] ?? -1;
+
+  // восстановление корректной позиции
+  {
+    const b = w.blocks[w.progress.blockIndex];
+    if (b) {
+      const p = w.progress;
+      const act = activeIdxs(b, p.setIndex);
+      if (!act.includes(p.itemIndex)) {
+        p.itemIndex = nextActive(b, p.setIndex, p.itemIndex);
+        if (p.itemIndex < 0) p.itemIndex = act[0] ?? 0;
+      }
+    }
+  }
 
   root.innerHTML = `
     <div class="session-top">
@@ -75,10 +94,6 @@ export async function renderSession(root, id) {
   let wakeLock = null;
 
   const curBlock = () => w.blocks[w.progress.blockIndex];
-  const curItem = () => {
-    const b = curBlock();
-    return b?.items[Math.min(w.progress.itemIndex, b.items.length - 1)];
-  };
   const isLastBlock = () => w.progress.blockIndex >= w.blocks.length - 1;
 
   const persist = () => db.put('workouts', w);
@@ -124,48 +139,53 @@ export async function renderSession(root, id) {
     const b = curBlock();
     if (!b) return;
     const p = w.progress;
-    const it = curItem();
+    const rounds = blockRounds(b);
+    const it = b.items[p.itemIndex];
+    const set = it?.setsList?.[Math.min(p.setIndex, it.setsList.length - 1)];
     const ex = exMap[it?.exerciseId];
 
-    $('#s-blocknum').textContent = `Блок ${p.blockIndex + 1} из ${w.blocks.length} · круг ${Math.min(p.setIndex + 1, b.sets)} из ${b.sets}`;
+    $('#s-blocknum').textContent = `Блок ${p.blockIndex + 1} из ${w.blocks.length} · круг ${Math.min(p.setIndex + 1, rounds)} из ${rounds}`;
     $('#s-ex').textContent = ex?.name || 'Упражнение удалено';
-    $('#s-ex-note').textContent = b.title ? `💬 ${b.title}` : '';
+    const notes = [b.title, it?.comment].filter(Boolean).join(' · ');
+    $('#s-ex-note').textContent = notes ? `💬 ${notes}` : '';
     $('#s-video').innerHTML = ex?.videoUrl
       ? `<a class="icon-link" href="${esc(ex.videoUrl)}" target="_blank" rel="noopener">▶ Посмотреть видео</a>`
       : '';
-    $('#s-weight').innerHTML = `${esc(String(it?.weight ?? '').replace('.', ','))} <span>кг</span>`;
-    $('#s-reps').textContent = it?.reps ?? '—';
+    $('#s-weight').innerHTML = `${esc(String(set?.weight ?? '').replace('.', ','))} <span>кг</span>`;
+    $('#s-reps').textContent = set?.reps ?? '—';
     $('#s-tempo').textContent = tempoStr(it?.tempo);
     $('#s-rest').textContent = b.restSec;
 
-    // список упражнений текущего круга
-    $('#s-items').innerHTML = b.items.map((x, i) => {
+    // список упражнений текущего круга (только участвующие)
+    $('#s-items').innerHTML = activeIdxs(b, p.setIndex).map(idx => {
+      const x = b.items[idx];
       const xe = exMap[x.exerciseId];
-      const state = i < p.itemIndex ? 'done' : i === p.itemIndex ? 'now' : '';
-      return `<div class="ri ${state}">${i < p.itemIndex ? '✓' : i === p.itemIndex ? '▶' : '•'} ${esc(xe?.name || 'Упражнение')} <span class="muted">— ${String(x.weight).replace('.', ',')} кг × ${x.reps}</span></div>`;
+      const xs = x.setsList[Math.min(p.setIndex, x.setsList.length - 1)];
+      const state = idx < p.itemIndex ? 'done' : idx === p.itemIndex ? 'now' : '';
+      return `<div class="ri ${state}">${state === 'done' ? '✓' : state === 'now' ? '▶' : '•'} ${esc(xe?.name || 'Упражнение')} <span class="muted">— ${String(xs?.weight ?? '').replace('.', ',')} кг × ${xs?.reps}</span></div>`;
     }).join('');
 
     // точки по кругам
-    $('#s-setnum').textContent = `Круг ${Math.min(p.setIndex + 1, b.sets)} из ${b.sets}`;
-    $('#s-dots').innerHTML = Array.from({ length: +b.sets || 0 }, (_, i) =>
+    $('#s-setnum').textContent = `Круг ${Math.min(p.setIndex + 1, rounds)} из ${rounds}`;
+    $('#s-dots').innerHTML = Array.from({ length: rounds }, (_, i) =>
       `<span class="set-dot ${i < p.setIndex ? 'done' : i === p.setIndex ? 'now' : ''}"></span>`).join('');
 
-    // общий прогресс в «единицах» (упражнение × круг)
-    const units = blk => (+blk.sets || 0) * (blk.items?.length || 0);
-    const total = w.blocks.reduce((s, x) => s + units(x), 0);
-    const done = w.blocks.slice(0, p.blockIndex).reduce((s, x) => s + units(x), 0)
-      + Math.min(p.setIndex, +b.sets || 0) * (b.items?.length || 0)
-      + Math.min(p.itemIndex, b.items?.length || 0);
+    // общий прогресс в подходах
+    const slots = blk => (blk.items || []).reduce((s, i) => s + (i.setsList?.length || 0), 0);
+    const total = w.blocks.reduce((s, x) => s + slots(x), 0);
+    const done = w.blocks.slice(0, p.blockIndex).reduce((s, x) => s + slots(x), 0)
+      + (b.items || []).reduce((s, i) => s + Math.min(p.setIndex, i.setsList?.length || 0), 0)
+      + (b.items || []).filter((_, idx) => idx < p.itemIndex && (b.items[idx].setsList?.length || 0) > p.setIndex).length;
     $('#s-bar').style.width = (total ? Math.round(done / total * 100) : 0) + '%';
 
     // подпись главной кнопки
-    const lastItem = p.itemIndex >= b.items.length - 1;
-    const lastRound = p.setIndex >= b.sets - 1;
-    $('#s-mark').textContent = !lastItem
-      ? '✓ Упражнение выполнено'
-      : !lastRound
+    const moreInRound = nextActive(b, p.setIndex, p.itemIndex) >= 0;
+    const lastRound = p.setIndex >= rounds - 1;
+    $('#s-mark').textContent = !moreInRound
+      ? !lastRound
         ? '✓ Круг выполнен'
-        : isLastBlock() ? 'Завершить тренировку →' : 'Следующий блок →';
+        : isLastBlock() ? 'Завершить тренировку →' : 'Следующий блок →'
+      : '✓ Подход выполнен';
 
     if (!w.progress.restEndsAt) restVisible(false);
   }
@@ -192,22 +212,25 @@ export async function renderSession(root, id) {
     const b = curBlock();
     const p = w.progress;
     vibrate(80);
-    if (p.itemIndex < b.items.length - 1) {
-      p.itemIndex++;                    // следующее упражнение круга — без отдыха
+    const nxt = nextActive(b, p.setIndex, p.itemIndex);
+    if (nxt >= 0) {
+      p.itemIndex = nxt;                       // следующее упражнение круга — без отдыха
       persist();
       renderUI();
     } else {
-      p.itemIndex = 0;
-      p.setIndex++;                     // круг завершён
-      if (p.setIndex >= b.sets) {
+      const first = nextActive(b, p.setIndex + 1, -1);
+      if (first >= 0) {
+        p.setIndex++;                          // круг завершён, есть ещё круги
+        p.itemIndex = first;
         persist();
         renderUI();
-        nextBlock();
-        return;
+        startRest(b.restSec);
+      } else {
+        p.setIndex++;
+        persist();
+        renderUI();
+        nextBlock();                           // блок завершён
       }
-      persist();
-      renderUI();
-      startRest(b.restSec);            // отдых между кругами
     }
   }
 
@@ -269,7 +292,7 @@ export async function renderSummary(root, id) {
       </div>
     </div>
 
-    <div class="section-title">Фактические значения по блокам</div>
+    <div class="section-title">Фактические значения по упражнениям</div>
     <div id="sum-blocks"></div>
 
     <div class="section-title">Показатели тренировки (необязательно)</div>
@@ -294,50 +317,53 @@ export async function renderSummary(root, id) {
 
   const blocksEl = root.querySelector('#sum-blocks');
 
-  const factBlock = i => w.actualBlocks?.[i];
+  function factSetRow(j, k, planSet, factSet) {
+    return `
+      <div class="set-row" data-set="${k}">
+        <span class="sn" title="План: ${fmtN(planSet.weight)}×${planSet.reps}">${k + 1}</span>
+        <div class="field">
+          <label>Вес, кг</label>
+          <input data-a="weight" type="number" inputmode="decimal" min="0" step="any" value="${esc(factSet?.weight ?? planSet.weight)}">
+        </div>
+        <div class="field">
+          <label>Повторений</label>
+          <input data-a="reps" type="number" inputmode="numeric" min="0" step="1" value="${esc(factSet?.reps ?? planSet.reps)}">
+        </div>
+        <label class="chk-skip" title="Подход не выполнен">
+          <input type="checkbox" data-askip ${factSet?.skipped ? 'checked' : ''}>
+          <span>✕</span>
+        </label>
+      </div>`;
+  }
 
-  function itemRow(bi, it, ii, fi) {
+  function itemForm(bi, it, ii, fi) {
     return `
       <div class="item-card" data-item="${ii}">
         <div class="row between" style="margin-bottom:6px">
-          <div>
+          <div class="grow">
             <b style="font-size:14.5px">${bi + 1}.${ii + 1} ${esc(exMap[it.exerciseId] || 'Упражнение удалено')}</b>
-            <div class="muted small">План: ${fmtN(it.weight)} кг × ${it.reps}</div>
-          </div>
-          <span data-item-deltas></span>
-        </div>
-        <div class="grid2">
-          <div class="field">
-            <label>Вес, кг</label>
-            <input data-a="weight" type="number" inputmode="decimal" min="0" step="any" value="${esc(fi?.actualWeight ?? it.weight)}">
-          </div>
-          <div class="field">
-            <label>Повторений</label>
-            <input data-a="reps" type="number" inputmode="numeric" min="0" step="1" value="${esc(fi?.actualReps ?? it.reps)}">
+            <div class="muted small">План: ${it.setsList.map(s => `${fmtN(s.weight)}×${s.reps}`).join(', ')}${it.comment ? ` · 💬 ${esc(it.comment)}` : ''}</div>
           </div>
         </div>
+        ${it.setsList.map((s, k) => factSetRow(ii, k, s, fi?.actualSets?.[k])).join('')}
+        <div class="pf-deltas" data-item-deltas></div>
       </div>`;
   }
 
   function blockForm(b, i) {
-    const f = factBlock(i);
+    const f = w.actualBlocks?.[i];
     return `
       <div class="block-card" data-i="${i}">
         <div class="row between" style="margin-bottom:8px">
           <div class="grow">
             <b>Блок ${i + 1}${b.title ? ` · ${esc(b.title)}` : ''}</b>
-            <div class="muted small">План: ${b.sets} ${plural(b.sets, ['круг', 'круга', 'кругов'])} × ${b.items.length} ${plural(b.items.length, ['упражнение', 'упражнения', 'упражнений'])}</div>
+            <div class="muted small">${blockRounds(b)} ${plural(blockRounds(b), ['круг', 'круга', 'кругов'])} · отдых ${b.restSec} с</div>
           </div>
           <label class="checkbox-row small" style="padding:0">
             <input type="checkbox" data-sk> пропущен
           </label>
         </div>
-        <div class="field">
-          <label>Кругов выполнено</label>
-          <input data-a="sets" type="number" inputmode="numeric" min="0" step="1" value="${esc(f?.setsActual ?? b.sets)}">
-          <div class="pf-deltas" data-round-deltas style="margin-top:4px"></div>
-        </div>
-        ${b.items.map((it, ii) => itemRow(i, it, ii, f?.items?.[ii])).join('')}
+        ${b.items.map((it, ii) => itemForm(i, it, ii, f?.items?.[ii])).join('')}
       </div>`;
   }
 
@@ -350,28 +376,32 @@ export async function renderSummary(root, id) {
       const upd = () => {
         const skipped = card.querySelector('[data-sk]').checked;
         card.querySelectorAll('input:not([data-sk])').forEach(x => { x.disabled = skipped; });
-        const roundEl = card.querySelector('[data-round-deltas]');
-        if (skipped) {
-          roundEl.innerHTML = '<span class="delta skip">Блок пропущен</span>';
-          card.querySelectorAll('[data-item-deltas]').forEach(el => el.innerHTML = '');
-          return;
-        }
-        // Δ кругов
-        const ds = (num(card.querySelector('[data-a="sets"]').value) ?? 0) - b.sets;
-        roundEl.innerHTML = ds
-          ? `<span class="delta ${ds > 0 ? 'pos' : 'neg'}">Круги ${ds > 0 ? '+' : '−'}${Math.abs(ds)}</span>`
-          : '<span class="delta pos">Круги по плану</span>';
-        // Δ по упражнениям
         card.querySelectorAll('.item-card').forEach(ic => {
           const ii = +ic.dataset.item;
           const it = b.items[ii];
-          const el = ic.querySelector('[data-item-deltas]');
+          const dEl = ic.querySelector('[data-item-deltas]');
+          if (skipped) { dEl.innerHTML = '<span class="delta skip">Блок пропущен</span>'; return; }
           const parts = [];
-          const dw = (num(ic.querySelector('[data-a="weight"]').value) ?? 0) - it.weight;
-          const dr = (num(ic.querySelector('[data-a="reps"]').value) ?? 0) - it.reps;
-          if (dw) parts.push(`<span class="delta ${dw > 0 ? 'pos' : 'neg'}">Вес ${dw > 0 ? '+' : '−'}${String(Math.abs(dw)).replace('.', ',')} кг</span>`);
-          if (dr) parts.push(`<span class="delta ${dr > 0 ? 'pos' : 'neg'}">Повтор. ${dr > 0 ? '+' : '−'}${Math.abs(dr)}</span>`);
-          el.innerHTML = parts.join(' ');
+          let done = 0;
+          ic.querySelectorAll('.set-row').forEach(row => {
+            const k = +row.dataset.set;
+            const plan = it.setsList[k];
+            const isSk = row.querySelector('[data-askip]').checked;
+            if (isSk) { parts.push(`<span class="delta skip">П${k + 1} пропущен</span>`); return; }
+            done++;
+            const aw = num(row.querySelector('[data-a="weight"]').value);
+            const ar = num(row.querySelector('[data-a="reps"]').value);
+            if (aw == null || aw < 0 || ar == null || ar < 0) return;
+            const dw = aw - plan.weight;
+            const dr = ar - plan.reps;
+            const seg = [];
+            if (dw) seg.push(`${dw > 0 ? '+' : '−'}${fmtN(Math.abs(dw))} кг`);
+            if (dr) seg.push(`${dr > 0 ? '+' : '−'}${Math.abs(dr)} повт`);
+            if (seg.length) parts.push(`<span class="delta ${dw < 0 || dr < 0 ? 'neg' : 'pos'}">П${k + 1}: ${seg.join(', ')}</span>`);
+          });
+          dEl.innerHTML = parts.length
+            ? parts.join('') + ` <span class="muted small">${done} из ${it.setsList.length}</span>`
+            : `<span class="delta pos">${done} из ${it.setsList.length} по плану</span>`;
         });
       };
 
@@ -389,31 +419,42 @@ export async function renderSummary(root, id) {
       const card = cards.find(c => +c.dataset.i === i);
       if (card.querySelector('[data-sk]').checked) {
         actual.push({
-          title: b.title, sets: b.sets, restSec: b.restSec, skipped: true, setsActual: 0,
-          items: b.items.map(it => ({ exerciseId: it.exerciseId, weight: it.weight, reps: it.reps, tempo: it.tempo, actualWeight: 0, actualReps: 0 })),
+          title: b.title, restSec: b.restSec, skipped: true,
+          items: b.items.map(it => ({
+            exerciseId: it.exerciseId, comment: it.comment, tempo: it.tempo,
+            setsList: it.setsList.map(s => ({ ...s })),
+            actualSets: it.setsList.map(() => ({ weight: 0, reps: 0, skipped: true })),
+          })),
         });
         continue;
-      }
-      const setsActual = num(card.querySelector('[data-a="sets"]').value);
-      if (setsActual == null || setsActual < 0) {
-        toast(`Блок ${i + 1}: укажите число выполненных кругов (или «пропущен»)`);
-        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        return;
       }
       const items = [];
       for (let j = 0; j < b.items.length; j++) {
         const it = b.items[j];
         const ic = card.querySelector(`.item-card[data-item="${j}"]`);
-        const aw = num(ic.querySelector('[data-a="weight"]').value);
-        const ar = num(ic.querySelector('[data-a="reps"]').value);
-        if (aw == null || aw < 0 || ar == null || ar < 0) {
-          toast(`Блок ${i + 1}, упражнение ${j + 1}: заполните вес и повторения (или «пропущен»)`);
-          ic.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          return;
+        const actualSets = [];
+        for (let k = 0; k < it.setsList.length; k++) {
+          const row = ic.querySelector(`.set-row[data-set="${k}"]`);
+          if (row.querySelector('[data-askip]').checked) {
+            actualSets.push({ weight: 0, reps: 0, skipped: true });
+            continue;
+          }
+          const aw = num(row.querySelector('[data-a="weight"]').value);
+          const ar = num(row.querySelector('[data-a="reps"]').value);
+          if (aw == null || aw < 0 || ar == null || ar < 0) {
+            toast(`Блок ${i + 1}, упр. ${j + 1}, подход ${k + 1}: заполните вес и повторения (или ✕)`);
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+          }
+          actualSets.push({ weight: aw, reps: Math.round(ar), skipped: false });
         }
-        items.push({ exerciseId: it.exerciseId, weight: it.weight, reps: it.reps, tempo: it.tempo, actualWeight: aw, actualReps: Math.round(ar) });
+        items.push({
+          exerciseId: it.exerciseId, comment: it.comment, tempo: it.tempo,
+          setsList: it.setsList.map(s => ({ ...s })),
+          actualSets,
+        });
       }
-      actual.push({ title: b.title, sets: b.sets, restSec: b.restSec, skipped: false, setsActual: Math.round(setsActual), items });
+      actual.push({ title: b.title, restSec: b.restSec, skipped: false, items });
     }
     const cal = num(root.querySelector('#st-cal').value);
     const hr = num(root.querySelector('#st-hr').value);
