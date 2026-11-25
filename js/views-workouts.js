@@ -153,11 +153,11 @@ export async function renderWorkoutForm(root, id) {
         </div>
         <div class="grid2">
           <div class="field">
-            <label>Подходов (кругов)</label>
+            <label title="Сколько раз пройти круг из всех упражнений блока">Кругов (подходов)</label>
             <input data-bf="sets" type="number" inputmode="numeric" min="1" step="1" value="${esc(b.sets)}">
           </div>
           <div class="field">
-            <label>Отдых между кругами, сек</label>
+            <label title="Отдых между кругами, в секундах">Отдых, сек</label>
             <input data-bf="restSec" type="number" inputmode="numeric" min="0" step="1" value="${esc(b.restSec)}">
           </div>
         </div>
