@@ -178,6 +178,31 @@ input[type="checkbox"] { width: 19px; height: 19px; accent-color: var(--accent);
 .pf-plan { color: var(--muted); font-size: 13.5px; }
 .pf-fact { font-size: 14px; margin-top: 5px; }
 .pf-deltas { margin-top: 6px; }
+.pf-item { padding: 8px 0 4px 10px; border-left: 2px solid var(--line); margin-top: 6px; }
+.pf-item b { font-size: 14.5px; }
+
+/* упражнение внутри блока (редактор, итоги) */
+.item-card {
+  background: var(--card2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 10px 0;
+  margin-bottom: 10px;
+}
+
+/* список упражнений текущего круга на экране выполнения */
+.round-items { margin: 12px 0 2px; }
+.ri {
+  padding: 7px 10px;
+  border-radius: 10px;
+  font-size: 14px;
+  color: var(--muted);
+  margin-bottom: 4px;
+  border: 1px solid transparent;
+}
+.ri.now { background: rgba(255, 107, 53, .14); border-color: rgba(255, 107, 53, .5); color: var(--text); font-weight: 700; }
+.ri.done { color: var(--ok); }
+.ri .muted { font-size: 12.5px; }
 
 /* ---- экран выполнения ---- */
 .session-top { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }

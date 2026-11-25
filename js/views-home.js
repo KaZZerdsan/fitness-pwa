@@ -1,12 +1,12 @@
 // Главный экран: активная тренировка или список предстоящих + бэкап
 import { db, exportAll, importAll } from './db.js';
 import { esc, fmtDate, fmtTime, fmtDur, todayISO, toast, confirmAction, downloadFile, plural } from './util.js';
-import { startWorkout, cancelWorkout } from './workout-ops.js';
+import { startWorkout, cancelWorkout, getWorkouts } from './workout-ops.js';
 
 function rerender() { window.dispatchEvent(new HashChangeEvent('hashchange')); }
 
 export async function render(root) {
-  const [workouts, exercises] = await Promise.all([db.getAll('workouts'), db.getAll('exercises')]);
+  const [workouts, exercises] = await Promise.all([getWorkouts(), db.getAll('exercises')]);
   const exMap = Object.fromEntries(exercises.map(e => [e.id, e.name]));
   const active = workouts.find(w => w.status === 'in_progress');
   const upcoming = workouts.filter(w => w.status === 'created')
@@ -14,19 +14,25 @@ export async function render(root) {
   const lastDone = workouts.filter(w => w.status === 'completed')
     .sort((a, b) => (b.finishedAt || '').localeCompare(a.finishedAt || ''))[0];
 
+  const exTotal = w => (w.blocks || []).reduce((s, b) => s + (b.items || []).length, 0);
   const blocksInfo = w => {
     const n = (w.blocks || []).length;
-    return `${n} ${plural(n, ['блок', 'блока', 'блоков'])}`;
+    const m = exTotal(w);
+    return `${n} ${plural(n, ['блок', 'блока', 'блоков'])} · ${m} ${plural(m, ['упражнение', 'упражнения', 'упражнений'])}`;
   };
 
   let html = '';
 
   if (active) {
     const b = active.blocks?.[active.progress?.blockIndex ?? 0] || active.blocks?.[0];
-    const totalSets = (active.blocks || []).reduce((s, x) => s + (+x.sets || 0), 0);
-    const doneSets = (active.blocks || []).slice(0, active.progress?.blockIndex ?? 0)
-      .reduce((s, x) => s + (+x.sets || 0), 0) + (active.progress?.setIndex ?? 0);
-    const pct = totalSets ? Math.round(doneSets / totalSets * 100) : 0;
+    const it = b?.items?.[Math.min(active.progress?.itemIndex ?? 0, (b?.items?.length || 1) - 1)];
+    const units = blk => (+blk.sets || 0) * (blk.items?.length || 0);
+    const totalUnits = (active.blocks || []).reduce((s, x) => s + units(x), 0);
+    const doneUnits = (active.blocks || []).slice(0, active.progress?.blockIndex ?? 0)
+      .reduce((s, x) => s + units(x), 0)
+      + (active.progress?.setIndex ?? 0) * (b?.items?.length || 0)
+      + Math.min(active.progress?.itemIndex ?? 0, b?.items?.length || 0);
+    const pct = totalUnits ? Math.round(doneUnits / totalUnits * 100) : 0;
     html += `
       <div class="card" style="border-color: var(--warn)">
         <div class="row between">
@@ -34,9 +40,9 @@ export async function render(root) {
           <span class="muted small">с ${fmtTime(active.startedAt)}</span>
         </div>
         <div class="s-ex-name" style="margin-top:8px">${esc(active.name)}</div>
-        ${b ? `<div class="muted">${esc(exMap[b.exerciseId] || 'Упражнение')} · подход ${(active.progress?.setIndex ?? 0) + 1} из ${+b.sets || 0}</div>` : ''}
+        ${it ? `<div class="muted">${esc(exMap[it.exerciseId] || 'Упражнение')} · круг ${(active.progress?.setIndex ?? 0) + 1} из ${+b.sets || 0}</div>` : ''}
         <div class="progress-track" style="margin:12px 0 6px"><div class="progress-fill" style="width:${pct}%"></div></div>
-        <div class="muted small">${doneSets} из ${totalSets} подходов · ${pct}%</div>
+        <div class="muted small">${doneUnits} из ${totalUnits} упражнений · ${pct}%</div>
         <div class="btn-row">
           <a class="btn primary xl" href="#/session/${active.id}">Продолжить</a>
         </div>

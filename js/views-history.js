@@ -1,9 +1,10 @@
 // История завершённых тренировок + прогресс по упражнению
 import { db } from './db.js';
 import { esc, fmtDate, fmtDur, fmtDateShort, chartSvg, plural } from './util.js';
+import { getWorkouts, blockHasDiff } from './workout-ops.js';
 
 export async function render(root) {
-  const workouts = (await db.getAll('workouts'))
+  const workouts = (await getWorkouts())
     .filter(w => w.status === 'completed')
     .sort((a, b) => (b.finishedAt || '').localeCompare(a.finishedAt || ''));
 
@@ -13,12 +14,7 @@ export async function render(root) {
       <a class="btn sm ghost" href="#/progress">📈 Прогресс</a>
     </div>
     ${workouts.length ? workouts.map(w => {
-      const diffCount = (w.blocks || []).filter((b, i) => {
-        const f = w.actualBlocks?.[i];
-        if (!f) return false;
-        if (f.skipped) return true;
-        return (+f.weight !== +b.weight) || (+f.sets !== +b.sets) || (+f.reps !== +b.reps);
-      }).length;
+      const diffCount = (w.blocks || []).filter((b, i) => blockHasDiff(b, w.actualBlocks?.[i])).length;
       return `
         <div class="card click" data-id="${w.id}">
           <div class="row between">
@@ -45,18 +41,22 @@ export async function render(root) {
 
 /* ---- прогресс по упражнению ---- */
 export async function renderProgress(root) {
-  const [workouts, exercises] = await Promise.all([db.getAll('workouts'), db.getAll('exercises')]);
+  const [workouts, exercises] = await Promise.all([getWorkouts(), db.getAll('exercises')]);
   const done = workouts.filter(w => w.status === 'completed')
     .sort((a, b) => (a.finishedAt || '').localeCompare(b.finishedAt || ''));
 
-  // упражнения с фактическими данными
-  const byEx = new Map(); // exerciseId -> [{w, block, fact}]
+  // упражнения с фактическими данными (по элементам суперсетов)
+  const byEx = new Map(); // exerciseId -> [{w, item, fItem, fBlock}]
   for (const w of done) {
     (w.blocks || []).forEach((b, i) => {
       const f = w.actualBlocks?.[i];
       if (!f || f.skipped) return;
-      if (!byEx.has(b.exerciseId)) byEx.set(b.exerciseId, []);
-      byEx.get(b.exerciseId).push({ w, block: b, fact: f });
+      b.items.forEach((it, j) => {
+        const fi = f.items?.[j];
+        if (!fi) return;
+        if (!byEx.has(it.exerciseId)) byEx.set(it.exerciseId, []);
+        byEx.get(it.exerciseId).push({ w, item: it, fItem: fi, fBlock: f });
+      });
     });
   }
 
@@ -88,23 +88,23 @@ export async function renderProgress(root) {
   const draw = () => {
     const id = root.querySelector('#p-ex').value;
     const arr = byEx.get(id) || [];
-    // по тренировке берём блок с максимальным фактическим весом
+    // по тренировке берём элемент с максимальным фактическим весом
     const perWorkout = new Map();
-    for (const { w, fact } of arr) {
-      const cur = perWorkout.get(w.id);
-      if (!cur || (+fact.weight || 0) > (+cur.fact.weight || 0)) perWorkout.set(w.id, { w, fact });
+    for (const e of arr) {
+      const cur = perWorkout.get(e.w.id);
+      if (!cur || (+e.fItem.actualWeight || 0) > (+cur.fItem.actualWeight || 0)) perWorkout.set(e.w.id, e);
     }
-    const pts = [...perWorkout.values()].map(({ w, fact }) => ({
+    const pts = [...perWorkout.values()].map(({ w, fItem }) => ({
       x: fmtDateShort(w.finishedAt),
-      y: +fact.weight || 0,
-      label: `${fmtKg(fact.weight)}×${fact.reps}`,
+      y: +fItem.actualWeight || 0,
+      label: `${fmtKg(fItem.actualWeight)}×${fItem.actualReps}`,
     }));
     root.querySelector('#p-chart').innerHTML = chartSvg(pts);
 
     const name = opts.find(o => o.id === id)?.name || '';
     root.querySelector('#p-table').innerHTML = `
-      <div class="section-title">${esc(name)} — все подходы</div>
-      ${arr.slice().reverse().map(({ w, block, fact }) => `
+      <div class="section-title">${esc(name)} — все выполнения</div>
+      ${arr.slice().reverse().map(({ w, item, fItem, fBlock }) => `
         <div class="card">
           <div class="row between">
             <div class="grow">
@@ -112,8 +112,8 @@ export async function renderProgress(root) {
               <div class="muted small">${fmtDate(w.finishedAt)}</div>
             </div>
             <div style="text-align:right">
-              <b>${fmtKg(fact.weight)} кг × ${fact.sets}×${fact.reps}</b>
-              <div class="muted small">план: ${fmtKg(block.weight)} кг × ${block.sets}×${block.reps}</div>
+              <b>${fmtKg(fItem.actualWeight)} кг × ${fBlock.setsActual}×${fItem.actualReps}</b>
+              <div class="muted small">план: ${fmtKg(item.weight)} кг × ${item.reps}</div>
             </div>
           </div>
         </div>`).join('')}`;
