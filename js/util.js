@@ -59,23 +59,78 @@ export function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
-/** «130-160» / «130 – 160» → {min,max}, иначе null */
-export function parseNorm(norm) {
-  if (!norm) return null;
-  const m = String(norm).replace(',', '.').match(/(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)/);
-  if (!m) return null;
-  let min = +m[1], max = +m[2];
-  if (min > max) [min, max] = [max, min];
-  return { min, max };
+/* ---- зоны нормы анализа ---- */
+
+/**
+ * Приводит норму к массиву зон { label, min, max, isNorm }.
+ * Понимает старый строковый формат: «130-160», «<6», «>12», «5»
+ * и уже готовый массив зон.
+ */
+export function zonesFromNorm(norm) {
+  if (Array.isArray(norm)) {
+    return norm.map(z => ({
+      label: z.label || '',
+      min: z.min ?? null,
+      max: z.max ?? null,
+      isNorm: !!z.isNorm,
+    }));
+  }
+  if (!norm) return [];
+  const s = String(norm).replace(',', '.').trim();
+  let m = s.match(/^<=?\s*(\d+(?:\.\d+)?)$/);
+  if (m) return [{ label: '', min: null, max: +m[1], isNorm: true }];
+  m = s.match(/^>=?\s*(\d+(?:\.\d+)?)$/);
+  if (m) return [{ label: '', min: +m[1], max: null, isNorm: true }];
+  m = s.match(/(\d+(?:\.\d+)?)\s*[-–—]\s*(\d+(?:\.\d+)?)/);
+  if (m) {
+    let a = +m[1], b = +m[2];
+    if (a > b) [a, b] = [b, a];
+    return [{ label: '', min: a, max: b, isNorm: true }];
+  }
+  m = s.match(/^(\d+(?:\.\d+)?)$/);
+  if (m) return [{ label: '', min: +m[1], max: +m[1], isNorm: true }];
+  return [];
 }
 
-/** значение вне нормы? */
-export function isOut(value, norm) {
+const fmtZ = v => String(v).replace('.', ',');
+
+/** зона → текст: «< 6», «6–12», «> 12», «5» */
+export function zoneText(z) {
+  const hasMin = z.min != null, hasMax = z.max != null;
+  if (hasMin && hasMax) return z.min === z.max ? fmtZ(z.min) : `${fmtZ(z.min)}–${fmtZ(z.max)}`;
+  if (hasMax) return `< ${fmtZ(z.max)}`;
+  if (hasMin) return `> ${fmtZ(z.min)}`;
+  return '—';
+}
+
+/** все зоны одной строкой: «Низкий < 6 · Норма 6–12 · Повышенный > 12» */
+export function zonesText(zones) {
+  return (zones || []).map(z => (z.label ? `${z.label} ` : '') + zoneText(z)).join(' · ');
+}
+
+/** в какую зону попадает значение (null — ни в какую).
+ *  Обе границы — включительно; одна граница — строго: «< 6» и «> 12». */
+export function matchZone(value, zones) {
   const v = num(value);
-  if (v == null) return false;
-  const r = parseNorm(norm);
-  if (!r) return false;
-  return v < r.min || v > r.max;
+  if (v == null) return null;
+  for (const z of zones || []) {
+    if (z.min != null && z.max != null) {
+      if (v >= z.min && v <= z.max) return z;
+    } else if (z.max != null) {
+      if (v < z.max) return z;
+    } else if (z.min != null) {
+      if (v > z.min) return z;
+    }
+  }
+  return null;
+}
+
+/** статус значения: 'ok' — в нормальной зоне, 'bad' — вне нормы, 'none' — нормы не заданы */
+export function valueStatus(value, zones) {
+  if (!zones || !zones.length) return 'none';
+  const z = matchZone(value, zones);
+  if (!z) return 'bad';
+  return z.isNorm ? 'ok' : 'bad';
 }
 
 /* ---- тосты ---- */

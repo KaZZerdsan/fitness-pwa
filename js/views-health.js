@@ -1,9 +1,17 @@
-// Показатели здоровья: записи, справочник анализов, превью, выгрузка
+// Показатели здоровья: записи, справочник анализов (зоны нормы), превью, выгрузка
 import { db } from './db.js';
-import { esc, uid, nowISO, todayISO, toast, confirmAction, num, isOut, parseNorm, fmtDate, fmtDateShort, chartSvg, downloadFile, plural } from './util.js';
+import { esc, uid, nowISO, todayISO, toast, confirmAction, num, chartSvg, downloadFile, plural,
+  zonesFromNorm, zoneText, zonesText, matchZone, valueStatus } from './util.js';
 
 function rerender() { window.dispatchEvent(new HashChangeEvent('hashchange')); }
 const fmtV = v => String(v ?? '').replace('.', ',');
+
+/* ---- нормализация при чтении: старое поле norm (строка) → zones ---- */
+const normAnalysis = a => a && { ...a, zones: zonesFromNorm(a.zones ?? a.norm), norm: undefined };
+const normRecord = r => r && {
+  ...r,
+  results: (r.results || []).map(x => ({ ...x, zones: zonesFromNorm(x.zones ?? x.norm), norm: undefined })),
+};
 
 /* ==================== ОСНОВНОЙ ЭКРАН (сегмент) ==================== */
 export async function render(root, seg = 'records') {
@@ -29,7 +37,7 @@ export async function render(root, seg = 'records') {
 }
 
 async function renderRecords(el) {
-  const records = (await db.getAll('records'))
+  const records = (await db.getAll('records')).map(normRecord)
     .sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
   if (!records.length) {
@@ -38,15 +46,18 @@ async function renderRecords(el) {
   }
 
   el.innerHTML = records.map(r => {
-    const out = (r.results || []).filter(x => isOut(x.value, x.norm)).length;
+    const bad = (r.results || []).filter(x => valueStatus(x.value, x.zones) === 'bad').length;
+    const hasNorms = (r.results || []).some(x => (x.zones || []).length);
     return `
       <div class="card click" data-id="${r.id}">
         <div class="row between">
           <div class="grow">
-            <b style="font-size:16px">${fmtDate(r.date)}</b>
+            <b style="font-size:16px">${fmtDateLocal(r.date)}</b>
             <div class="muted small">${(r.results || []).length} ${plural((r.results || []).length, ['показатель', 'показателя', 'показателей'])}${r.note ? ` · ${esc(r.note)}` : ''}</div>
           </div>
-          ${out ? `<span class="badge b-out">⚠ ${out} вне нормы</span>` : '<span class="badge b-ok">в норме</span>'}
+          ${!hasNorms ? '' : bad
+            ? `<span class="badge b-out">⚠ ${bad} вне нормы</span>`
+            : '<span class="badge b-ok">в норме</span>'}
         </div>
       </div>`;
   }).join('');
@@ -56,9 +67,15 @@ async function renderRecords(el) {
   }));
 }
 
+function fmtDateLocal(d) {
+  if (!d) return '—';
+  return new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short', year: 'numeric' }).format(new Date(d));
+}
+
 async function renderAnalyses(el) {
-  const [analyses, records] = await Promise.all([db.getAll('analyses'), db.getAll('records')]);
-  const list = analyses.sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ru'));
+  const [analyses, recordsRaw] = await Promise.all([db.getAll('analyses'), db.getAll('records')]);
+  const records = recordsRaw.map(normRecord);
+  const list = analyses.map(normAnalysis).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ru'));
 
   if (!list.length) {
     el.innerHTML = '<div class="empty"><span class="big">📋</span>Справочник пуст. Добавьте виды анализов: гемоглобин, глюкоза и т.д.</div>';
@@ -67,12 +84,13 @@ async function renderAnalyses(el) {
 
   el.innerHTML = list.map(a => {
     const uses = records.filter(r => (r.results || []).some(x => x.analysisId === a.id)).length;
+    const normLine = (a.zones || []).length ? esc(zonesText(a.zones)) : 'не задана';
     return `
       <div class="card click" data-id="${a.id}">
         <div class="row between">
           <div class="grow">
             <b style="font-size:16px">${esc(a.name)}</b>
-            <div class="muted small">${esc(a.unit || '—')} · норма: ${esc(a.norm || '—')} · записей: ${uses}</div>
+            <div class="muted small">${esc(a.unit || '—')} · норма: ${normLine} · записей: ${uses}</div>
           </div>
           <div class="row" style="gap:6px">
             <button class="btn icon" data-edit="${a.id}">✏️</button>
@@ -99,10 +117,15 @@ async function renderAnalyses(el) {
   }));
 }
 
-/** форма анализа (оверлей) */
+/** форма анализа (оверлей) с конструктором зон нормы */
 function openAnalysisForm(parent, an, after) {
   const overlay = document.createElement('div');
   overlay.className = 'overlay';
+
+  // черновик зон: минимум одна строка
+  const zones = (an?.zones || []).map(z => ({ ...z }));
+  if (!zones.length) zones.push({ label: '', min: null, max: null, isNorm: true });
+
   overlay.innerHTML = `
     <div class="sheet">
       <h3>${an ? 'Изменить анализ' : 'Новый анализ'}</h3>
@@ -110,17 +133,20 @@ function openAnalysisForm(parent, an, after) {
         <label>Название *</label>
         <input id="a-name" type="text" maxlength="80" placeholder="Например: Гемоглобин" value="${esc(an?.name || '')}">
       </div>
-      <div class="grid2">
-        <div class="field">
-          <label>Единица измерения</label>
-          <input id="a-unit" type="text" maxlength="20" placeholder="г/л" value="${esc(an?.unit || '')}">
-        </div>
-        <div class="field">
-          <label>Норма</label>
-          <input id="a-norm" type="text" maxlength="40" placeholder="130–160" value="${esc(an?.norm || '')}">
-        </div>
+      <div class="field">
+        <label>Единица измерения</label>
+        <input id="a-unit" type="text" maxlength="20" placeholder="г/л" value="${esc(an?.unit || '')}">
       </div>
-      <div class="muted small" style="margin-bottom:12px">Норма вида «130–160» позволит подсвечивать значения вне диапазона.</div>
+      <div class="set-head">
+        <label>Зоны нормы</label>
+        <button class="btn sm ghost" id="z-add" type="button">+ Зона</button>
+      </div>
+      <div id="z-rows"></div>
+      <div class="muted small" style="margin:6px 0 12px">
+        Укажите «От» и/или «До» (пустое поле = без границы). Пример:
+        «Низкий» до 6 · «Норма» 6–12 · «Повышенный» от 12.
+        Галочка ✓ — это нормальная зона. Одинаковые «От» и «До» = точное значение.
+      </div>
       <div class="btn-row">
         <button class="btn ghost" id="a-cancel">Отмена</button>
         <button class="btn primary" id="a-save">Сохранить</button>
@@ -128,19 +154,88 @@ function openAnalysisForm(parent, an, after) {
     </div>`;
   parent.appendChild(overlay);
   overlay.querySelector('#a-name').focus();
+
+  const rowsEl = overlay.querySelector('#z-rows');
+
+  const zoneVal = v => (v == null ? '' : v);
+
+  function rowHTML(z, i) {
+    return `
+      <div class="zone-row" data-z="${i}">
+        <label class="chk-skip" title="Это нормальная зона">
+          <input type="checkbox" data-zf="isNorm" ${z.isNorm ? 'checked' : ''}>
+        </label>
+        <div class="field">
+          <label>Пояснение</label>
+          <input data-zf="label" type="text" maxlength="30" placeholder="Низкий / Норма…" value="${esc(z.label || '')}">
+        </div>
+        <div class="field">
+          <label>От</label>
+          <input data-zf="min" type="number" inputmode="decimal" step="any" placeholder="—" value="${zoneVal(z.min)}">
+        </div>
+        <span class="zn">—</span>
+        <div class="field">
+          <label>До</label>
+          <input data-zf="max" type="number" inputmode="decimal" step="any" placeholder="—" value="${zoneVal(z.max)}">
+        </div>
+        <button class="btn icon sm danger" data-zdel ${zones.length === 1 ? 'disabled' : ''} title="Удалить зону">✕</button>
+      </div>`;
+  }
+
+  function renderRows() {
+    rowsEl.innerHTML = zones.map(rowHTML).join('');
+    rowsEl.querySelectorAll('.zone-row').forEach(row => {
+      const z = zones[+row.dataset.z];
+      row.querySelectorAll('[data-zf]').forEach(inp => {
+        inp.addEventListener('input', () => {
+          const f = inp.dataset.zf;
+          z[f] = f === 'isNorm' ? inp.checked : f === 'label' ? inp.value : num(inp.value);
+        });
+      });
+      row.querySelector('[data-zdel]').addEventListener('click', () => {
+        if (zones.length === 1) return;
+        zones.splice(+row.dataset.z, 1);
+        renderRows();
+      });
+    });
+  }
+  renderRows();
+
+  overlay.querySelector('#z-add').addEventListener('click', () => {
+    zones.push({ label: '', min: null, max: null, isNorm: false });
+    renderRows();
+    rowsEl.lastElementChild?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+
   const close = () => overlay.remove();
   overlay.querySelector('#a-cancel').addEventListener('click', close);
   overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+
   overlay.querySelector('#a-save').addEventListener('click', async () => {
     const name = overlay.querySelector('#a-name').value.trim();
     if (!name) { toast('Укажите название'); return; }
-    const norm = overlay.querySelector('#a-norm').value.trim();
-    if (norm && !parseNorm(norm)) toast('Норму не удалось распознать как диапазон — сохраню как есть');
+    const clean = zones
+      .map(z => ({
+        label: (z.label || '').trim(),
+        min: z.min ?? null,
+        max: z.max ?? null,
+        isNorm: !!z.isNorm,
+      }))
+      .filter(z => z.min != null || z.max != null)
+      .map(z => {
+        const a = { ...z };
+        if (a.min != null && a.max != null && a.min > a.max) [a.min, a.max] = [a.max, a.min];
+        return a;
+      });
+    if (zones.some(z => z.label && z.min == null && z.max == null)) {
+      toast('У зоны с пояснением укажите хотя бы одну границу');
+      return;
+    }
     await db.put('analyses', {
       id: an?.id || uid(),
       name,
       unit: overlay.querySelector('#a-unit').value.trim(),
-      norm,
+      zones: clean,
       createdAt: an?.createdAt || nowISO(),
     });
     toast('Сохранено');
@@ -151,8 +246,8 @@ function openAnalysisForm(parent, an, after) {
 
 /* ==================== ФОРМА ЗАПИСИ ==================== */
 export async function renderRecordForm(root, id) {
-  const existing = id ? await db.get('records', id) : null;
-  const analyses = (await db.getAll('analyses'))
+  const existing = id ? normRecord(await db.get('records', id)) : null;
+  const analyses = (await db.getAll('analyses')).map(normAnalysis)
     .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ru'));
 
   const draft = existing
@@ -182,10 +277,13 @@ export async function renderRecordForm(root, id) {
     </div>`;
 
   const rowsEl = root.querySelector('#r-rows');
-  let analysisList = [...analyses]; // может пополниться новыми
+  let analysisList = [...analyses];
 
   function anOptions(sel) {
-    return analysisList.map(a => `<option value="${a.id}" ${a.id === sel ? 'selected' : ''}>${esc(a.name)}${a.norm ? ` (${esc(a.norm)})` : ''}</option>`).join('');
+    return analysisList.map(a => {
+      const norm = (a.zones || []).length ? ` (${zonesText(a.zones)})` : '';
+      return `<option value="${a.id}" ${a.id === sel ? 'selected' : ''}>${esc(a.name)}${esc(norm)}</option>`;
+    }).join('');
   }
 
   function rowHTML(r, i) {
@@ -230,7 +328,9 @@ export async function renderRecordForm(root, id) {
 
   function showNorm(card, r) {
     const a = analysisList.find(x => x.id === r.analysisId);
-    card.querySelector('[data-norm]').textContent = a ? `единица: ${a.unit || '—'} · норма: ${a.norm || '—'}` : '';
+    card.querySelector('[data-norm]').textContent = a
+      ? `единица: ${a.unit || '—'}${(a.zones || []).length ? ' · норма: ' + zonesText(a.zones) : ' · норма не задана'}`
+      : '';
   }
 
   renderRows();
@@ -238,7 +338,8 @@ export async function renderRecordForm(root, id) {
   root.querySelector('#r-add').addEventListener('click', () => {
     if (!analysisList.length) {
       openAnalysisForm(root, null, async () => {
-        analysisList = (await db.getAll('analyses')).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ru'));
+        analysisList = (await db.getAll('analyses')).map(normAnalysis)
+          .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ru'));
         draft.results.push({ analysisId: analysisList[analysisList.length - 1]?.id || '', value: '' });
         renderRows();
       });
@@ -259,14 +360,14 @@ export async function renderRecordForm(root, id) {
       if (!r.analysisId) { toast(`Строка ${i + 1}: выберите анализ`); return; }
       if (num(r.value) == null) { toast(`Строка ${i + 1}: укажите значение`); return; }
     }
-    // снапшот полей анализа
+    // снапшот полей анализа (включая зоны нормы)
     draft.results = draft.results.map(r => {
       const a = analysisList.find(x => x.id === r.analysisId);
       return {
         analysisId: a.id,
         analysisName: a.name,
         unit: a.unit || '',
-        norm: a.norm || '',
+        zones: (a.zones || []).map(z => ({ ...z })),
         value: num(r.value),
       };
     });
@@ -278,11 +379,23 @@ export async function renderRecordForm(root, id) {
 
 /* ==================== ПРОСМОТР ЗАПИСИ (превью + выгрузка) ==================== */
 export async function renderRecordView(root, id) {
-  const r = await db.get('records', id);
+  const r = normRecord(await db.get('records', id));
   if (!r) { toast('Запись не найдена'); location.hash = '#/health/records'; return; }
 
   const rows = r.results || [];
-  const outCount = rows.filter(x => isOut(x.value, x.norm)).length;
+  const badCount = rows.filter(x => valueStatus(x.value, x.zones) === 'bad').length;
+  const hasNorms = rows.some(x => (x.zones || []).length);
+
+  const valueCell = x => {
+    const status = valueStatus(x.value, x.zones);
+    const z = matchZone(x.value, x.zones);
+    const cls = status === 'bad' ? ' val-out' : '';
+    // пояснение зоны — в тултип, чтобы не растягивать таблицу
+    const tip = z ? (z.label ? `${z.label}: ${zoneText(z)}` : zoneText(z)) : '';
+    const arrow = status === 'bad' && z && z.min != null && z.max == null ? ' ↑'
+      : status === 'bad' && z && z.max != null && z.min == null ? ' ↓' : '';
+    return `<td class="num${cls}"${tip ? ` title="${esc(tip)}"` : ''}>${fmtV(x.value)}${x.unit ? ` ${esc(x.unit)}` : ''}${arrow}</td>`;
+  };
 
   root.innerHTML = `
     <div class="page-title row between">
@@ -292,23 +405,21 @@ export async function renderRecordView(root, id) {
     <div class="preview-card" id="preview">
       <div class="p-head">
         <span class="p-title">Показатели</span>
-        <span class="p-date">${fmtDate(r.date)}${r.note ? ` · ${esc(r.note)}` : ''}</span>
+        <span class="p-date">${fmtDateLocal(r.date)}${r.note ? ` · ${esc(r.note)}` : ''}</span>
       </div>
       ${rows.length ? `
         <table class="p-table">
           <tr><th>Анализ</th><th style="text-align:right">Значение</th><th style="text-align:right">Норма</th></tr>
-          ${rows.map(x => {
-            const out = isOut(x.value, x.norm);
-            const arrow = out ? (num(x.value) > parseNorm(x.norm).max ? ' ↑' : ' ↓') : '';
-            return `<tr>
-              <td>${esc(x.analysisName)}</td>
-              <td class="num${out ? ' val-out' : ''}">${fmtV(x.value)}${x.unit ? ` ${esc(x.unit)}` : ''}${arrow}</td>
-              <td class="norm">${esc(x.norm || '—')}</td>
-            </tr>`;
-          }).join('')}
+          ${rows.map(x => `<tr>
+            <td>${esc(x.analysisName)}</td>
+            ${valueCell(x)}
+            <td class="norm">${esc((x.zones || []).length ? zonesText(x.zones) : '—')}</td>
+          </tr>`).join('')}
         </table>`
       : '<div class="p-note">Нет показателей</div>'}
-      ${outCount ? `<div class="p-note" style="color:#d32f2f;font-weight:700">⚠ ${outCount} ${plural(outCount, ['значение', 'значения', 'значений'])} вне нормы</div>` : '<div class="p-note" style="color:#2e7d32;font-weight:700">✓ Все значения в норме</div>'}
+      ${!hasNorms ? '<div class="p-note">Нормы не заданы</div>'
+        : badCount ? `<div class="p-note" style="color:#d32f2f;font-weight:700">⚠ ${badCount} ${plural(badCount, ['значение', 'значения', 'значений'])} вне нормы</div>`
+        : '<div class="p-note" style="color:#2e7d32;font-weight:700">✓ Все значения в норме</div>'}
     </div>
     <div class="card">
       <div class="row" style="gap:10px">
@@ -322,11 +433,17 @@ export async function renderRecordView(root, id) {
     </div>`;
 
   const shareText = () => {
-    const lines = [`Показатели — ${fmtDate(r.date)}`];
+    const lines = [`Показатели — ${fmtDateLocal(r.date)}`];
     if (r.note) lines.push(r.note);
     for (const x of rows) {
-      const out = isOut(x.value, x.norm);
-      lines.push(`• ${x.analysisName}: ${fmtV(x.value)}${x.unit ? ' ' + x.unit : ''}${x.norm ? ` (норма: ${x.norm})` : ''}${out ? ' ⚠ вне нормы' : ' ✓'}`);
+      const status = valueStatus(x.value, x.zones);
+      const z = matchZone(x.value, x.zones);
+      let tail = '';
+      if ((x.zones || []).length) {
+        if (z) tail = ` (${z.label ? z.label + ': ' : ''}${zoneText(z)}${status === 'ok' ? ' ✓' : ' ⚠'})`;
+        else tail = ' ⚠ вне диапазонов';
+      }
+      lines.push(`• ${x.analysisName}: ${fmtV(x.value)}${x.unit ? ' ' + x.unit : ''}${tail}`);
     }
     return lines.join('\n');
   };
@@ -346,8 +463,13 @@ export async function renderRecordView(root, id) {
 
   root.querySelector('#pv-csv').addEventListener('click', () => {
     const csv = [
-      'Анализ;Значение;Единица;Норма',
-      ...rows.map(x => `"${String(x.analysisName).replace(/"/g, '""')}";${fmtV(x.value)};"${x.unit || ''}";"${x.norm || ''}"`),
+      'Анализ;Значение;Единица;Норма;Статус',
+      ...rows.map(x => {
+        const status = valueStatus(x.value, x.zones);
+        const z = matchZone(x.value, x.zones);
+        const st = !(x.zones || []).length ? '' : status === 'ok' ? 'норма' : (z ? (z.label || 'вне нормы') : 'вне диапазонов');
+        return `"${String(x.analysisName).replace(/"/g, '""')}";${fmtV(x.value)};"${x.unit || ''}";"${(x.zones || []).length ? zonesText(x.zones) : ''}";"${st}"`;
+      }),
     ].join('\r\n');
     downloadFile(`pokazateli-${r.date}.csv`, '\uFEFF' + csv, 'text/csv');
     toast('CSV сохранён');
@@ -364,16 +486,29 @@ export async function renderRecordView(root, id) {
 
 /* ==================== ИСТОРИЯ ПО АНАЛИЗУ ==================== */
 export async function renderAnalysisView(root, id) {
-  const [a, records] = await Promise.all([db.get('analyses', id), db.getAll('records')]);
-  if (!a) { toast('Анализ не найден'); location.hash = '#/health/analyses'; return; }
+  const [aRaw, recordsRaw] = await Promise.all([db.get('analyses', id), db.getAll('records')]);
+  if (!aRaw) { toast('Анализ не найден'); location.hash = '#/health/analyses'; return; }
+  const a = normAnalysis(aRaw);
+  const records = recordsRaw.map(normRecord);
 
   const entries = [];
   for (const r of records) {
     for (const x of (r.results || [])) {
-      if (x.analysisId === a.id) entries.push({ date: r.date, note: r.note, value: num(x.value), norm: x.norm || a.norm });
+      if (x.analysisId === a.id) entries.push({ date: r.date, note: r.note, value: num(x.value), zones: x.zones || a.zones });
     }
   }
   entries.sort((x, y) => (x.date || '').localeCompare(y.date || ''));
+
+  const zoneBadge = e => {
+    const status = valueStatus(e.value, e.zones);
+    if (status === 'none') return '<span class="badge b-ok">без нормы</span>';
+    if (status === 'ok') {
+      const z = matchZone(e.value, e.zones);
+      return `<span class="badge b-ok">${z?.label ? esc(z.label) : 'в норме'}</span>`;
+    }
+    const z = matchZone(e.value, e.zones);
+    return `<span class="badge b-out">${z?.label ? esc(z.label) : 'вне нормы'}</span>`;
+  };
 
   root.innerHTML = `
     <div class="page-title row between">
@@ -383,15 +518,22 @@ export async function renderAnalysisView(root, id) {
     <div class="card">
       <div class="stat-line">
         <span>Единица: <b>${esc(a.unit || '—')}</b></span>
-        <span>Норма: <b>${esc(a.norm || '—')}</b></span>
         <span>Записей: <b>${entries.length}</b></span>
       </div>
+      ${(a.zones || []).length ? `
+        <div style="margin-top:8px">
+          ${(a.zones || []).map(z => `
+            <div class="row between small" style="padding:3px 0">
+              <span>${z.label ? esc(z.label) : '<span class="muted">без пояснения</span>'} ${zoneText(z)}</span>
+              ${z.isNorm ? '<span class="badge b-ok">норма</span>' : ''}
+            </div>`).join('')}
+        </div>` : '<div class="muted small" style="margin-top:6px">Норма не задана</div>'}
       <div style="margin-top:10px">
         ${chartSvg(entries.map(e => ({
-          x: fmtDateShort(e.date),
+          x: e.date ? new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit' }).format(new Date(e.date)) : '',
           y: e.value ?? 0,
           label: fmtV(e.value),
-          out: isOut(e.value, e.norm),
+          out: valueStatus(e.value, e.zones) === 'bad',
         })))}
       </div>
     </div>
@@ -401,9 +543,9 @@ export async function renderAnalysisView(root, id) {
         <div class="row between">
           <div class="grow">
             <b style="font-size:16px">${fmtV(e.value)} ${esc(a.unit || '')}</b>
-            <div class="muted small">${fmtDate(e.date)}${e.note ? ` · ${esc(e.note)}` : ''}</div>
+            <div class="muted small">${fmtDateLocal(e.date)}${e.note ? ` · ${esc(e.note)}` : ''}</div>
           </div>
-          ${isOut(e.value, e.norm) ? '<span class="badge b-out">вне нормы</span>' : '<span class="badge b-ok">в норме</span>'}
+          ${zoneBadge(e)}
         </div>
       </div>`).join('')
     : '<div class="empty">Для этого анализа ещё нет значений.<br>Добавьте их в разделе «Записи».</div>'}
